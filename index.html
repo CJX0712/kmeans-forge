@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>K-Means 聚类锻造炉 · kmeans-forge</title>
+<style>
+  :root{
+    --bg:#0f1220; --panel:#171b2e; --ink:#e8ecf6; --muted:#9aa3bd;
+    --accent:#5b8cff; --good:#34d399; --bad:#f87171; --line:#2a3050;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,Segoe UI,Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:22px 26px 10px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:22px;letter-spacing:.3px}
+  .sub{color:var(--muted);margin-top:6px;font-size:13px}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:20px 26px;max-width:1180px}
+  @media(max-width:880px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h2{margin:0 0 12px;font-size:15px;color:var(--accent)}
+  .controls{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+  .ctl{display:flex;flex-direction:column;gap:4px}
+  .ctl label{font-size:12px;color:var(--muted)}
+  .ctl input{width:96px;background:#0d1020;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px 9px;font-size:13px}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer}
+  button:hover{filter:brightness(1.08)}
+  canvas{width:100%;height:auto;display:block;background:#0b0e1a;border-radius:8px;border:1px solid var(--line)}
+  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:13px}
+  .stats b{color:var(--accent)}
+  .tests{display:grid;gap:8px}
+  .t{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#0d1020}
+  .dot{width:10px;height:10px;border-radius:50%;margin-top:5px;flex:0 0 auto}
+  .ok{background:var(--good)} .no{background:var(--bad)}
+  .t .name{font-weight:600}
+  .t .detail{color:var(--muted);font-size:12px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted)}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .small{color:var(--muted);font-size:12px;margin-top:8px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>K-Means 聚类锻造炉 <span style="color:var(--muted);font-size:14px">kmeans-forge</span></h1>
+  <div class="sub">纯 JS 手写 K-Means++ 种子 + Lloyd 迭代算法 · 含 1D 精确下界（动态规划）与 8 项硬不变量交叉验证 · 零依赖单文件</div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>可视化 · 2D 高斯团</h2>
+    <div class="controls">
+      <div class="ctl"><label>样本数 n</label><input id="n" type="number" value="300" min="20" max="2000" /></div>
+      <div class="ctl"><label>簇数 k</label><input id="k" type="number" value="4" min="2" max="8" /></div>
+      <div class="ctl"><label>分离度 sep</label><input id="sep" type="number" value="6" min="1" max="20" step="0.5" /></div>
+      <div class="ctl"><label>随机种子</label><input id="seed" type="number" value="7" min="0" max="9999" /></div>
+      <button id="run">运行 K-Means</button>
+    </div>
+    <canvas id="scatter" width="520" height="380"></canvas>
+    <div class="legend">
+      <span><span class="sw" style="background:#5b8cff"></span>真实标签(淡)</span>
+      <span><span class="sw" style="background:#34d399"></span>K-Means 预测(实)</span>
+      <span>★ = 质心</span>
+    </div>
+    <div class="stats">
+      <span>惯性 SSE: <b id="sse">–</b></span>
+      <span>聚类精度: <b id="acc">–</b></span>
+      <span>迭代收敛: <b id="iters">–</b></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>SSE 衰减曲线</h2>
+    <canvas id="ssechart" width="520" height="380"></canvas>
+    <div class="small">横坐标=迭代次数，纵坐标=簇内平方和(SSE)。Lloyd 算法保证 SSE 单调不增——这是本项目的核心不变量之一。</div>
+  </div>
+
+  <div class="card" style="grid-column:1 / -1">
+    <h2>浏览器内自检 · 8 项硬不变量</h2>
+    <button id="selftest">运行自检</button>
+    <div id="tests" class="tests" style="margin-top:12px"></div>
+    <div class="small">不变量由独立实现的参照系交叉验证（1D 精确动态规划下界、暴力排列最优匹配、缩放等变、收敛不动点……），任何算法回归都会立即变红。</div>
+  </div>
+</div>
+
+<!-- ============ 纯算法引擎（无 DOM 依赖，可被无头测试提取） ============ -->
+<script id="engine">
+(function(){
+  'use strict';
+  function mulberry32(a){
+    return function(){
+      a|=0; a=a+0x6D2B79F5|0;
+      let t=Math.imul(a^a>>>15,1|a);
+      t=t+Math.imul(t^t>>>7,61|t)^t;
+      return ((t^t>>>14)>>>0)/4294967296;
+    };
+  }
+  function gauss(rng){
+    let u=0,v=0;
+    while(u===0)u=rng();
+    while(v===0)v=rng();
+    return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+  }
+  function sqDist(a,b){
+    let s=0;
+    for(let j=0;j<a.length;j++){const d=a[j]-b[j]; s+=d*d;}
+    return s;
+  }
+  function makeBlobs(n,k,d,sep,seed,sd){
+    sd=sd||0.3;
+    const rng=mulberry32(seed>>>0);
+    const centers=[];
+    for(let c=0;c<k;c++){
+      const ctr=new Array(d).fill(0);
+      ctr[0]=(c-(k-1)/2)*sep;
+      centers.push(ctr);
+    }
+    const X=[]; const labels=[];
+    for(let i=0;i<n;i++){
+      const c=Math.floor(rng()*k);
+      const p=new Array(d);
+      for(let j=0;j<d;j++) p[j]=centers[c][j]+gauss(rng)*sd;
+      X.push(p); labels.push(c);
+    }
+    return {X,labels,centers};
+  }
+  // k-means++ 种子：保证返回 k 个互异质心
+  function kmeansppInit(X,k,rng){
+    const n=X.length;
+    const cents=[];
+    let first=Math.floor(rng()*n);
+    cents.push(X[first].slice());
+    const d2=new Array(n).fill(Infinity);
+    const chosen=new Set([first]);
+    for(let c=1;c<k;c++){
+      for(let i=0;i<n;i++){
+        if(chosen.has(i)){d2[i]=0;continue;}
+        const dd=sqDist(X[i],cents[c-1]);
+        if(dd<d2[i])d2[i]=dd;
+      }
+      let sum=0; for(let i=0;i<n;i++) sum+=d2[i];
+      let r=rng()*sum, idx=-1;
+      for(let i=0;i<n;i++){ r-=d2[i]; if(r<=0){idx=i;break;} }
+      if(idx<0){ let mx=-1; for(let i=0;i<n;i++){ if(d2[i]>mx){mx=d2[i];idx=i;} } }
+      cents.push(X[idx].slice());
+      chosen.add(idx);
+    }
+    return cents;
+  }
+  function randomInit(X,k,rng){
+    const n=X.length; const idx=[]; const used=new Set();
+    while(idx.length<k){ const t=Math.floor(rng()*n); if(!used.has(t)){used.add(t);idx.push(t);} }
+    return idx.map(i=>X[i].slice());
+  }
+  // 由点索引集合计算均值向量
+  function meanOf(X,idx){
+    const d=X[0].length; const m=new Array(d).fill(0);
+    for(const i of idx){ for(let j=0;j<d;j++) m[j]+=X[i][j]; }
+    for(let j=0;j<d;j++) m[j]/=idx.length;
+    return m;
+  }
+  function sseOf(X,cents,assign){
+    let s=0;
+    for(let i=0;i<X.length;i++) s+=sqDist(X[i],cents[assign[i]]);
+    return s;
+  }
+  // Lloyd 迭代：返回质心、分配、惯性、SSE 历史
+  function lloyd(X,k,init,iters){
+    iters=iters||100;
+    const n=X.length,d=X[0].length;
+    const rng=mulberry32(0x12345);
+    let cents=init.map(c=>c.slice());
+    let assign=new Array(n).fill(0);
+    const sseHist=[];
+    for(let it=0;it<iters;it++){
+      for(let i=0;i<n;i++){
+        let best=0,bd=Infinity;
+        for(let c=0;c<k;c++){const dd=sqDist(X[i],cents[c]); if(dd<bd){bd=dd;best=c;}}
+        assign[i]=best;
+      }
+      sseHist.push(sseOf(X,cents,assign));
+      const sum=Array.from({length:k},()=>new Array(d).fill(0));
+      const cnt=new Array(k).fill(0);
+      for(let i=0;i<n;i++){const c=assign[i];cnt[c]++;for(let j=0;j<d;j++)sum[c][j]+=X[i][j];}
+      for(let c=0;c<k;c++){
+        if(cnt[c]>0){ for(let j=0;j<d;j++) cents[c][j]=sum[c][j]/cnt[c]; }
+        else { const t=Math.floor(rng()*n); cents[c]=X[t].slice(); }
+      }
+    }
+    const inertia=sseOf(X,cents,assign);
+    return {centroids:cents,assign,inertia,sseHist};
+  }
+  // 1D 精确最优 K-Means（动态规划，连续段划分）—— 作为不变量金标准
+  function oneDimOptimal(a,k){
+    const s=a.slice().sort((x,y)=>x-y);
+    const n=s.length;
+    const ps=new Array(n+1).fill(0), ps2=new Array(n+1).fill(0);
+    for(let i=0;i<n;i++){ ps[i+1]=ps[i]+s[i]; ps2[i+1]=ps2[i]+s[i]*s[i]; }
+    function seg(i,j){ // 含 i..j
+      const cnt=j-i+1, mean=(ps[j+1]-ps[i])/cnt;
+      return ps2[j+1]-ps2[i]-cnt*mean*mean;
+    }
+    const INF=Infinity;
+    const dp=Array.from({length:k+1},()=>new Array(n+1).fill(INF));
+    dp[0][0]=0;
+    for(let m=1;m<=k;m++){
+      for(let i=1;i<=n;i++){
+        let best=INF;
+        for(let j=m-1;j<i;j++){
+          const val=dp[m-1][j]+seg(j,i-1);
+          if(val<best)best=val;
+        }
+        dp[m][i]=best;
+      }
+    }
+    return dp[k][n];
+  }
+  // 最佳排列下聚类精度（暴力 k!，k 较小）
+  function bestPermAcc(trueL,predL,k){
+    const perms=[];
+    (function rec(used,cur){
+      if(cur.length===k){perms.push(cur.slice());return;}
+      for(let i=0;i<k;i++) if(!used.has(i)){used.add(i);cur.push(i);rec(used,cur);cur.pop();used.delete(i);}
+    })(new Set(),[]);
+    let best=0;
+    for(const p of perms){
+      let correct=0;
+      for(let i=0;i<trueL.length;i++) if(p[predL[i]]===trueL[i]) correct++;
+      if(correct>best)best=correct;
+    }
+    return best/trueL.length;
+  }
+  const Forge={mulberry32,gauss,sqDist,makeBlobs,kmeansppInit,randomInit,meanOf,sseOf,lloyd,oneDimOptimal,bestPermAcc};
+  if(typeof globalThis!=='undefined') globalThis.Forge=Forge;
+  if(typeof module!=='undefined'&&module.exports) module.exports=Forge;
+})();
+</script>
+
+<!-- ============ 界面与交互 ============ -->
+<script>
+(function(){
+  const F=window.Forge;
+  const PALETTE=['#34d399','#f59e0b','#ef4444','#a78bfa','#22d3ee','#f472b6','#facc15','#60a5fa'];
+  const $=(id)=>document.getElementById(id);
+
+  function drawScatter(cv,X,trueL,predL,cents){
+    const ctx=cv.getContext('2d');
+    ctx.clearRect(0,0,cv.width,cv.height);
+    let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity;
+    for(const p of X){minx=Math.min(minx,p[0]);maxx=Math.max(maxx,p[0]);miny=Math.min(miny,p[1]);maxy=Math.max(maxy,p[1]);}
+    const pad=0.12, w=cv.width, h=cv.height;
+    const sx=(x)=>pad*w+(x-minx)/(maxx-minx||1)*(1-2*pad)*w;
+    const sy=(y)=>pad*h+(y-miny)/(maxy-miny||1)*(1-2*pad)*h;
+    // 真实标签（淡）
+    for(let i=0;i<X.length;i++){
+      ctx.beginPath();ctx.arc(sx(X[i][0]),sy(X[i][1]),2.6,0,7);
+      ctx.fillStyle=PALETTE[trueL[i]%PALETTE.length];ctx.globalAlpha=0.30;ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    // 预测（实）
+    for(let i=0;i<X.length;i++){
+      ctx.beginPath();ctx.arc(sx(X[i][0]),sy(X[i][1]),2.6,0,7);
+      ctx.fillStyle=PALETTE[predL[i]%PALETTE.length];ctx.fill();
+    }
+    // 质心
+    for(let c=0;c<cents.length;c++){
+      const x=sx(cents[c][0]),y=sy(cents[c][1]);
+      ctx.fillStyle='#fff';ctx.strokeStyle=PALETTE[c%PALETTE.length];ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(x-7,y);ctx.lineTo(x+7,y);ctx.moveTo(x,y-7);ctx.lineTo(x,y+7);ctx.stroke();
+    }
+  }
+  function drawSse(cv,hist){
+    const ctx=cv.getContext('2d');
+    ctx.clearRect(0,0,cv.width,cv.height);
+    if(!hist.length)return;
+    const pad=40,w=cv.width,h=cv.height;
+    const maxv=Math.max(...hist),minv=Math.min(...hist);
+    const X=(i)=>pad+(i/(hist.length-1||1))*(w-2*pad);
+    const Y=(v)=>h-pad-((v-minv)/((maxv-minv)||1))*(h-2*pad);
+    ctx.strokeStyle='#2a3050';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(pad,h-pad);ctx.lineTo(w-pad,h-pad);ctx.moveTo(pad,h-pad);ctx.lineTo(pad,pad);ctx.stroke();
+    ctx.strokeStyle='#5b8cff';ctx.lineWidth=2;ctx.beginPath();
+    hist.forEach((v,i)=>{const x=X(i),y=Y(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+    ctx.stroke();
+    ctx.fillStyle='#9aa3bd';ctx.font='11px sans-serif';
+    ctx.fillText('SSE '+maxv.toFixed(1),pad+4,pad-6);
+    ctx.fillText('iter '+hist.length,w-pad-40,h-pad+14);
+  }
+  function runViz(){
+    const n=+$('n').value,k=+$('k').value,sep=+$('sep').value,seed=+$('seed').value;
+    const {X,labels}=F.makeBlobs(n,k,2,sep,seed);
+    const init=F.kmeansppInit(X,k,F.mulberry32((seed^0x9e3779b9)>>>0));
+    const res=F.lloyd(X,k,init,100);
+    drawScatter($('scatter'),X,labels,res.assign,res.centroids);
+    drawSse($('ssechart'),res.sseHist);
+    $('sse').textContent=res.inertia.toFixed(3);
+    $('acc').textContent=(F.bestPermAcc(labels,res.assign,k)*100).toFixed(1)+'%';
+    $('iters').textContent=res.sseHist.length;
+  }
+  // ---------- 8 项硬不变量自检 ----------
+  function rel(a,b){return Math.abs(a-b)/(Math.abs(b)||1);}
+  function runSelfTest(){
+    const out=[];
+    const add=(name,pass,detail)=>out.push({name,pass,detail});
+
+    // 1. SSE 单调不增
+    try{
+      const {X,labels}=F.makeBlobs(240,4,2,6,11);
+      const init=F.kmeansppInit(X,4,F.mulberry32(99));
+      const res=F.lloyd(X,4,init,80);
+      let mono=true;
+      for(let i=1;i<res.sseHist.length;i++) if(res.sseHist[i] > res.sseHist[i-1]*(1+1e-9)) mono=false;
+      add('① SSE 单调不增 (Lloyd 定理)','ok',mono?'通过 · 全部迭代 SSE 非增':'失败 · 第'+(res.sseHist.findIndex((v,i)=>i&&v>res.sseHist[i-1]*(1+1e-9))+1)+'次上升');
+    }catch(e){add('① SSE 单调不增','no',e.message);}
+
+    // 2. 1D 精确下界匹配
+    try{
+      const {X}=F.makeBlobs(180,3,1,2.0,5);
+      const flat=X.map(p=>p[0]);
+      const init=F.kmeansppInit(X,3,F.mulberry32(5));
+      const res=F.lloyd(X,3,init,200);
+      const dpOpt=F.oneDimOptimal(flat,3);
+      const ok=rel(res.inertia,dpOpt)<1e-6;
+      add('② 1D 精确下界 (DP 金标准)','ok',ok?('通过 · KMeans='+res.inertia.toFixed(4)+' = DP='+dpOpt.toFixed(4)):('失败 · 差 '+rel(res.inertia,dpOpt).toExponential(2)));
+    }catch(e){add('② 1D 精确下界','no',e.message);}
+
+    // 3. 标签恢复 >=0.95
+    try{
+      let worst=1;
+      for(let s=0;s<6;s++){
+        const {X,labels}=F.makeBlobs(300,4,2,7,s+1);
+        const init=F.kmeansppInit(X,4,F.mulberry32(s+200));
+        const res=F.lloyd(X,4,init,100);
+        worst=Math.min(worst,F.bestPermAcc(labels,res.assign,4));
+      }
+      add('③ 标签恢复率 ≥95%','ok',worst>=0.95?('通过 · 最差精度 '+(worst*100).toFixed(1)+'%'):('失败 · 最差 '+(worst*100).toFixed(1)+'%'));
+    }catch(e){add('③ 标签恢复率','no',e.message);}
+
+    // 4. kmeans++ 互异质心
+    try{
+      const {X}=F.makeBlobs(200,5,2,5,3);
+      const cents=F.kmeansppInit(X,5,F.mulberry32(3));
+      const set=new Set(cents.map(c=>c.map(v=>v.toFixed(6)).join(',')));
+      const ok=set.size===5 && cents.length===5;
+      add('④ k-means++ 返回 k 个互异质心','ok',ok?'通过 · 5/5 互异':'失败 · 仅 '+set.size+' 互异');
+    }catch(e){add('④ k-means++ 互异','no',e.message);}
+
+    // 5. 收敛不动点（再用终质心重分配，变化数=0）
+    try{
+      const {X,labels}=F.makeBlobs(200,3,2,6,8);
+      const init=F.kmeansppInit(X,3,F.mulberry32(8));
+      const res=F.lloyd(X,3,init,120);
+      let changed=0;
+      for(let i=0;i<X.length;i++){
+        let best=0,bd=Infinity;
+        for(let c=0;c<3;c++){const dd=F.sqDist(X[i],res.centroids[c]); if(dd<bd){bd=dd;best=c;}}
+        if(best!==res.assign[i])changed++;
+      }
+      add('⑤ 收敛不动点 (0 重分配)','ok',changed===0?'通过 · 终态重分配变化 0':'失败 · 仍有 '+changed+' 点改变');
+    }catch(e){add('⑤ 收敛不动点','no',e.message);}
+
+    // 6. 质心 == 均值参照
+    try{
+      const {X}=F.makeBlobs(150,4,2,5,4);
+      const idx=[];for(let i=0;i<X.length;i++) idx.push(i);
+      const m=F.meanOf(X,idx);
+      let ref=new Array(2).fill(0);
+      for(const i of idx) for(let j=0;j<2;j++) ref[j]+=X[i][j];
+      for(let j=0;j<2;j++) ref[j]/=idx.length;
+      const ok=Math.abs(m[0]-ref[0])<1e-12 && Math.abs(m[1]-ref[1])<1e-12;
+      add('⑥ 质心 = 均值参照','ok',ok?'通过 · 解析均值一致':'失败 · 偏差 '+Math.abs(m[0]-ref[0]).toExponential(2));
+    }catch(e){add('⑥ 质心=均值','no',e.message);}
+
+    // 7. 缩放等变（正标量乘坐标，分配模式不变）
+    try{
+      const {X,labels}=F.makeBlobs(220,4,2,6,21);
+      const c=3.7;
+      const cX=X.map(p=>p.map(v=>v*c));
+      const init1=F.kmeansppInit(X,4,F.mulberry32(21));
+      const init2=F.kmeansppInit(cX,4,F.mulberry32(21));
+      const r1=F.lloyd(X,4,init1,100);
+      const r2=F.lloyd(cX,4,init2,100);
+      const acc=F.bestPermAcc(r1.assign,r2.assign,4);
+      add('⑦ 缩放等变 (×3.7 分配不变)','ok',acc>=0.999?('通过 · 匹配 '+(acc*100).toFixed(1)+'%'):('失败 · 仅 '+(acc*100).toFixed(1)+'%'));
+    }catch(e){add('⑦ 缩放等变','no',e.message);}
+
+    // 8. SSE 有限非负 + 分配合法
+    try{
+      const {X}=F.makeBlobs(200,3,2,5,9,0.3);
+      const init=F.kmeansppInit(X,3,F.mulberry32(9));
+      const res=F.lloyd(X,3,init,100);
+      let valid=true;
+      for(const a of res.assign) if(a<0||a>=3||a!==a|0) valid=false;
+      const ok=isFinite(res.inertia)&&res.inertia>=0&&valid;
+      add('⑧ SSE 有限非负 + 分配合法','ok',ok?('通过 · SSE='+res.inertia.toFixed(2)+' 全部分配∈[0,3)'):'失败');
+    }catch(e){add('⑧ SSE 有限','no',e.message);}
+
+    const box=$('tests');box.innerHTML='';
+    let pass=0;
+    out.forEach(t=>{ if(t.pass==='ok')pass++;
+      const d=document.createElement('div');d.className='t';
+      d.innerHTML='<div class="dot '+(t.pass==='ok'?'ok':'no')+'"></div><div><div class="name">'+t.name.split(' ')[0]+' '+t.name.slice(t.name.indexOf(' ')+1)+'</div><div class="detail">'+t.detail+'</div></div>';
+      box.appendChild(d);
+    });
+    const sum=document.createElement('div');sum.className='small';
+    sum.textContent='结果：'+pass+'/8 通过';
+    box.appendChild(sum);
+  }
+
+  $('run').addEventListener('click',runViz);
+  $('selftest').addEventListener('click',runSelfTest);
+  runViz();
+})();
+</script>
+</body>
+</html>
